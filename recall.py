@@ -327,7 +327,7 @@ class SemanticIndex:
         return pairs
 
 
-# --- Reciprocal Rank Fusion ---
+# --- Fusion Methods ---
 
 def reciprocal_rank_fusion(
     ranked_lists: list[list[tuple[str, float]]],
@@ -343,6 +343,48 @@ def reciprocal_rank_fusion(
         for rank, (path, _) in enumerate(ranked):
             scores[path] = scores.get(path, 0.0) + 1.0 / (k + rank + 1)
     result = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return result
+
+
+def _min_max_normalize(results: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Normalize scores to [0, 1] range using min-max scaling."""
+    if not results:
+        return results
+    scores = [s for _, s in results]
+    min_s, max_s = min(scores), max(scores)
+    if max_s == min_s:
+        return [(path, 1.0) for path, _ in results]
+    return [(path, (s - min_s) / (max_s - min_s)) for path, s in results]
+
+
+def convex_combination(
+    bm25_results: list[tuple[str, float]],
+    semantic_results: list[tuple[str, float]],
+    alpha: float = 0.5,
+) -> list[tuple[str, float]]:
+    """Combine BM25 and semantic results using convex combination.
+
+    Outperforms RRF and needs only one tunable parameter (alpha).
+    alpha=0.5 weights both equally. alpha=0.7 favors BM25.
+
+    Both result lists are min-max normalized to [0,1] before combining:
+        final_score = alpha * bm25_score + (1 - alpha) * semantic_score
+
+    Documents appearing in only one list get 0 for the missing score.
+    """
+    # Normalize both to [0, 1]
+    bm25_norm = dict(_min_max_normalize(bm25_results))
+    sem_norm = dict(_min_max_normalize(semantic_results))
+
+    # Combine all paths
+    all_paths = set(bm25_norm.keys()) | set(sem_norm.keys())
+    fused = {}
+    for path in all_paths:
+        bm25_score = bm25_norm.get(path, 0.0)
+        sem_score = sem_norm.get(path, 0.0)
+        fused[path] = alpha * bm25_score + (1 - alpha) * sem_score
+
+    result = sorted(fused.items(), key=lambda x: x[1], reverse=True)
     return result
 
 
@@ -398,7 +440,7 @@ def hybrid_search(
     recency_boost: float = 0.0,
     recency_half_life: float = 30.0,
 ) -> list[tuple[Document, float]]:
-    """Run hybrid BM25 + semantic search with RRF fusion."""
+    """Run hybrid BM25 + semantic search with convex combination fusion."""
     # Filter by confidence if metadata available
     if min_confidence > 0:
         filtered = []
@@ -436,9 +478,9 @@ def hybrid_search(
             bm25.build(documents)
             bm25_results = [(doc.path, score) for doc, score in bm25.search(query, limit * 2)]
 
-    # Fuse
+    # Fuse (convex combination by default, outperforms RRF)
     if mode == "hybrid" and bm25_results and semantic_results:
-        fused = reciprocal_rank_fusion([bm25_results, semantic_results])
+        fused = convex_combination(bm25_results, semantic_results, alpha=0.5)
     elif bm25_results:
         fused = bm25_results
     elif semantic_results:
