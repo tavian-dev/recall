@@ -77,6 +77,21 @@ Note content here.
 
 All frontmatter fields are optional. Title falls back to first `#` heading, then filename. `date` enables recency boosting. `confidence` enables filtering with `--min-confidence`.
 
+## Adding memories
+
+```bash
+# Add a fact
+recall add "Git PAT tokens expire after 30 days" --dir ./notes --type fact --confidence 0.8
+
+# Add with tags
+recall add "BM25 scores are not normalized" --dir ./notes --tags "search,bm25" --source observation
+
+# Add a decision
+recall add "Using RRF over learned fusion for now" --dir ./notes --type decision --confidence 0.7
+```
+
+Creates a markdown file with YAML frontmatter (type, confidence, source, tags, date). Auto-generates filename from content.
+
 ## MCP Server
 
 recall includes an MCP (Model Context Protocol) server for integration with Claude Code and other MCP-compatible tools.
