@@ -1,6 +1,0 @@
-
-[dev]
-pytest>=7.0
-
-[semantic]
-chromadb>=1.0
