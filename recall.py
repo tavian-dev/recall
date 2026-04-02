@@ -328,8 +328,21 @@ def hybrid_search(
     limit: int = 10,
     mode: str = "hybrid",
     persist_dir: Optional[Path] = None,
+    min_confidence: float = 0.0,
 ) -> list[tuple[Document, float]]:
     """Run hybrid BM25 + semantic search with RRF fusion."""
+    # Filter by confidence if metadata available
+    if min_confidence > 0:
+        filtered = []
+        for doc in documents:
+            conf = doc.meta.get("confidence", "1.0")
+            try:
+                if float(conf) >= min_confidence:
+                    filtered.append(doc)
+            except (ValueError, TypeError):
+                filtered.append(doc)  # No confidence = include
+        documents = filtered
+
     doc_by_path = {d.path: d for d in documents}
 
     # BM25
@@ -390,7 +403,10 @@ def cmd_search(args):
 
     persist_dir = directory / ".recall_index"
     query = " ".join(args.query)
-    results = hybrid_search(documents, query, args.limit, args.mode, persist_dir)
+    results = hybrid_search(
+        documents, query, args.limit, args.mode, persist_dir,
+        min_confidence=args.min_confidence,
+    )
 
     if not results:
         print("No results found.")
@@ -476,6 +492,7 @@ def main():
     search_parser.add_argument("--verbose", "-v", action="store_true", help="Show details")
     search_parser.add_argument("--format", "-f", choices=["text", "json"], default="text", help="Output format")
     search_parser.add_argument("--mode", "-m", choices=["bm25", "semantic", "hybrid"], default="hybrid", help="Search mode")
+    search_parser.add_argument("--min-confidence", "-c", type=float, default=0.0, help="Minimum confidence threshold (0.0-1.0)")
 
     stats_parser = subparsers.add_parser("stats", help="Show index stats")
     stats_parser.add_argument("--dir", "-d", dest="directory", default=".", help="Directory")
@@ -491,6 +508,7 @@ def main():
             args.verbose = False
             args.format = "text"
             args.mode = "hybrid"
+            args.min_confidence = 0.0
         else:
             parser.print_help()
             sys.exit(1)
