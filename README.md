@@ -77,6 +77,15 @@ Note content here.
 
 All frontmatter fields are optional. Title falls back to first `#` heading, then filename. `date` enables recency boosting. `confidence` enables filtering with `--min-confidence`.
 
+## Testing
+
+```bash
+pip install pytest
+python -m pytest test_recall.py -v
+```
+
+64 tests covering tokenization, frontmatter parsing, BM25 ranking, reciprocal rank fusion, file discovery, recency scoring, hybrid search, and semantic index. Semantic index tests skip gracefully if ChromaDB isn't installed.
+
 ## License
 
 MIT
