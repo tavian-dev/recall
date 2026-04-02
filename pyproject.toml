@@ -7,7 +7,7 @@ name = "recall-search"
 version = "0.3.0"
 description = "Hybrid search over markdown files — BM25F keywords + semantic embeddings with convex combination fusion"
 readme = "README.md"
-license = "MIT"
+license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = []
 keywords = ["search", "bm25", "hybrid-search", "semantic-search", "markdown", "knowledge-base"]
