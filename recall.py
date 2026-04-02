@@ -2,7 +2,7 @@
 """recall — hybrid search over markdown memory files.
 
 Combines BM25 keyword search with ChromaDB semantic embeddings
-using reciprocal rank fusion for best-of-both retrieval.
+using convex combination fusion for best-of-both retrieval.
 
 Usage:
     recall search <query> [--dir PATH] [--limit N] [--verbose] [--format json]

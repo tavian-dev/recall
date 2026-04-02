@@ -1,6 +1,6 @@
 # recall
 
-Hybrid search over markdown files — BM25 keywords + semantic embeddings, fused with reciprocal rank fusion.
+Hybrid search over markdown files — BM25F keywords + semantic embeddings, fused with convex combination.
 
 Built for searching personal knowledge bases, zettelkasten notes, and agent memory files.
 
@@ -49,7 +49,7 @@ python recall.py stats --dir ./notes
 
 1. **BM25F** — multi-field BM25 that properly handles title + body scoring. Normalizes term frequency per field, combines with configurable weights, then applies saturation once (avoiding the double-counting problem of naive per-field BM25). Tag exact matching adds a bonus.
 2. **Semantic** — ChromaDB with built-in sentence-transformer embeddings. Understands that "login failures" relates to "authentication errors." Persistent index (`.recall_index/`) avoids re-embedding unchanged files.
-3. **Reciprocal Rank Fusion** — combines both ranked lists into a single result set. Documents strong in both methods rank highest.
+3. **Convex combination fusion** — `final = alpha * bm25 + (1-alpha) * semantic`. Simpler and empirically better than Reciprocal Rank Fusion (RRF). Documents strong in both methods rank highest.
 
 ## Recency boost
 
@@ -122,7 +122,7 @@ pip install pytest
 python -m pytest test_recall.py -v
 ```
 
-77 tests covering tokenization, frontmatter parsing, BM25 ranking, reciprocal rank fusion, file discovery, recency scoring, hybrid search, semantic index, and MCP server tools.
+77 tests covering tokenization, frontmatter parsing, BM25 ranking, convex combination fusion, file discovery, recency scoring, hybrid search, semantic index, and MCP server tools.
 
 ## License
 
