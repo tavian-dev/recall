@@ -77,6 +77,29 @@ Note content here.
 
 All frontmatter fields are optional. Title falls back to first `#` heading, then filename. `date` enables recency boosting. `confidence` enables filtering with `--min-confidence`.
 
+## MCP Server
+
+recall includes an MCP (Model Context Protocol) server for integration with Claude Code and other MCP-compatible tools.
+
+```bash
+# Install FastMCP
+pip install fastmcp
+
+# Register with Claude Code
+claude mcp add recall -- python3 /path/to/recall/mcp_server.py
+
+# Or run standalone
+python mcp_server.py
+```
+
+### Tools exposed
+
+- **recall_search** — search with readable text output
+- **recall_search_json** — search with structured JSON output
+- **recall_stats** — index statistics
+
+Each tool accepts `query`, `directory`, `limit`, and `mode` (bm25/semantic/hybrid) parameters.
+
 ## Testing
 
 ```bash
@@ -84,7 +107,7 @@ pip install pytest
 python -m pytest test_recall.py -v
 ```
 
-64 tests covering tokenization, frontmatter parsing, BM25 ranking, reciprocal rank fusion, file discovery, recency scoring, hybrid search, and semantic index. Semantic index tests skip gracefully if ChromaDB isn't installed.
+77 tests covering tokenization, frontmatter parsing, BM25 ranking, reciprocal rank fusion, file discovery, recency scoring, hybrid search, semantic index, and MCP server tools.
 
 ## License
 
