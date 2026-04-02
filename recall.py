@@ -19,6 +19,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -322,6 +323,33 @@ def find_markdown_files(directory: Path) -> list[Path]:
 
 # --- Search Orchestrator ---
 
+def _parse_date(value: str) -> Optional[date]:
+    """Try to parse a date string from frontmatter."""
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%d %H:%M:%S", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(value.strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _recency_score(doc: Document, boost: float, half_life: float = 30.0) -> float:
+    """Compute a recency bonus for a document based on its date metadata.
+
+    Returns boost * exp(-age_days / half_life). Documents without a date
+    field get zero bonus (no penalty either).
+    """
+    date_str = doc.meta.get("date", "")
+    if not date_str:
+        return 0.0
+    doc_date = _parse_date(str(date_str))
+    if doc_date is None:
+        return 0.0
+    age_days = max(0, (date.today() - doc_date).days)
+    return boost * math.exp(-age_days / half_life)
+
+
 def hybrid_search(
     documents: list[Document],
     query: str,
@@ -329,6 +357,8 @@ def hybrid_search(
     mode: str = "hybrid",
     persist_dir: Optional[Path] = None,
     min_confidence: float = 0.0,
+    recency_boost: float = 0.0,
+    recency_half_life: float = 30.0,
 ) -> list[tuple[Document, float]]:
     """Run hybrid BM25 + semantic search with RRF fusion."""
     # Filter by confidence if metadata available
@@ -378,6 +408,18 @@ def hybrid_search(
     else:
         return []
 
+    # Apply recency boost if enabled
+    if recency_boost > 0:
+        boosted = []
+        for path, score in fused:
+            if path in doc_by_path:
+                bonus = _recency_score(doc_by_path[path], recency_boost, recency_half_life)
+                boosted.append((path, score + bonus))
+            else:
+                boosted.append((path, score))
+        boosted.sort(key=lambda x: x[1], reverse=True)
+        fused = boosted
+
     results = []
     for path, score in fused[:limit]:
         if path in doc_by_path:
@@ -406,6 +448,8 @@ def cmd_search(args):
     results = hybrid_search(
         documents, query, args.limit, args.mode, persist_dir,
         min_confidence=args.min_confidence,
+        recency_boost=args.recency_boost,
+        recency_half_life=args.recency_half_life,
     )
 
     if not results:
@@ -493,6 +537,8 @@ def main():
     search_parser.add_argument("--format", "-f", choices=["text", "json"], default="text", help="Output format")
     search_parser.add_argument("--mode", "-m", choices=["bm25", "semantic", "hybrid"], default="hybrid", help="Search mode")
     search_parser.add_argument("--min-confidence", "-c", type=float, default=0.0, help="Minimum confidence threshold (0.0-1.0)")
+    search_parser.add_argument("--recency-boost", "-r", type=float, default=0.0, help="Recency boost factor (0.0=off, try 0.1-0.5). Recent docs with date metadata score higher.")
+    search_parser.add_argument("--recency-half-life", type=float, default=30.0, help="Half-life in days for recency decay (default: 30)")
 
     stats_parser = subparsers.add_parser("stats", help="Show index stats")
     stats_parser.add_argument("--dir", "-d", dest="directory", default=".", help="Directory")
@@ -509,6 +555,8 @@ def main():
             args.format = "text"
             args.mode = "hybrid"
             args.min_confidence = 0.0
+            args.recency_boost = 0.0
+            args.recency_half_life = 30.0
         else:
             parser.print_help()
             sys.exit(1)
