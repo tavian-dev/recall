@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""recall — search markdown memory files using BM25 ranking.
+"""recall — hybrid search over markdown memory files.
+
+Combines BM25 keyword search with ChromaDB semantic embeddings
+using reciprocal rank fusion for best-of-both retrieval.
 
 Usage:
-    recall <query> [directory] [--limit N] [--verbose]
-    recall index [directory]
-    recall stats [directory]
-
-Indexes markdown files with optional YAML frontmatter and returns
-ranked results. No external dependencies — pure stdlib.
+    recall search <query> [--dir PATH] [--limit N] [--verbose] [--format json]
+    recall search <query> [--dir PATH] [--mode bm25|semantic|hybrid]
+    recall stats [--dir PATH]
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -54,7 +55,6 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
     frontmatter_str = content[3:end].strip()
     body = content[end + 3:].strip()
 
-    # Simple YAML-ish parser (handles key: value, key: [list])
     meta = {}
     for line in frontmatter_str.split("\n"):
         line = line.strip()
@@ -66,11 +66,9 @@ def parse_frontmatter(content: str) -> tuple[dict, str]:
         key = key.strip()
         value = value.strip()
 
-        # Handle [list] syntax
         if value.startswith("[") and value.endswith("]"):
             items = value[1:-1].split(",")
             meta[key] = [item.strip().strip("\"'") for item in items if item.strip()]
-        # Handle quoted strings
         elif (value.startswith('"') and value.endswith('"')) or \
              (value.startswith("'") and value.endswith("'")):
             meta[key] = value[1:-1]
@@ -95,6 +93,18 @@ class Document:
     def token_count(self) -> int:
         return len(self.tokens)
 
+    def content_hash(self) -> str:
+        """Hash for change detection (re-embed only when content changes)."""
+        return hashlib.md5((self.title + self.body).encode()).hexdigest()
+
+    def search_text(self) -> str:
+        """Combined text for semantic embedding."""
+        parts = [self.title]
+        if self.tags:
+            parts.append(f"tags: {', '.join(self.tags)}")
+        parts.append(self.body[:2000])  # Cap body to avoid huge embeddings
+        return "\n".join(parts)
+
 
 def load_document(filepath: Path) -> Optional[Document]:
     """Load a markdown file as a Document."""
@@ -105,7 +115,6 @@ def load_document(filepath: Path) -> Optional[Document]:
 
     meta, body = parse_frontmatter(content)
 
-    # Extract title from frontmatter or first heading
     title = meta.get("title", meta.get("name", ""))
     if not title:
         heading_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
@@ -115,7 +124,7 @@ def load_document(filepath: Path) -> Optional[Document]:
     if isinstance(tags, str):
         tags = [t.strip() for t in tags.split(",")]
 
-    doc = Document(
+    return Document(
         path=str(filepath),
         title=str(title),
         body=body,
@@ -124,7 +133,6 @@ def load_document(filepath: Path) -> Optional[Document]:
         title_tokens=tokenize(str(title)),
         tags=[t.lower() for t in tags],
     )
-    return doc
 
 
 # --- BM25 Index ---
@@ -135,23 +143,20 @@ class BM25Index:
     documents: list[Document] = field(default_factory=list)
     avg_doc_len: float = 0.0
     doc_count: int = 0
-    df: dict[str, int] = field(default_factory=dict)  # document frequency
+    df: dict[str, int] = field(default_factory=dict)
     k1: float = 1.2
     b: float = 0.75
     title_boost: float = 3.0
     tag_boost: float = 2.0
 
     def build(self, documents: list[Document]):
-        """Build the index from a list of documents."""
         self.documents = documents
         self.doc_count = len(documents)
         if self.doc_count == 0:
             return
-
         total_tokens = sum(d.token_count() for d in documents)
-        self.avg_doc_len = total_tokens / self.doc_count
+        self.avg_doc_len = total_tokens / self.doc_count if self.doc_count else 1
 
-        # Compute document frequencies
         self.df = Counter()
         for doc in documents:
             unique_terms = set(doc.tokens) | set(doc.title_tokens)
@@ -159,13 +164,10 @@ class BM25Index:
                 self.df[term] += 1
 
     def idf(self, term: str) -> float:
-        """Inverse document frequency with smoothing."""
         n = self.df.get(term, 0)
         return math.log((self.doc_count - n + 0.5) / (n + 0.5) + 1)
 
     def score_document(self, doc: Document, query_tokens: list[str]) -> float:
-        """Score a single document against query tokens."""
-        # Body BM25
         body_tf = Counter(doc.tokens)
         doc_len = doc.token_count()
         body_score = 0.0
@@ -178,34 +180,131 @@ class BM25Index:
             denominator = tf + self.k1 * (1 - self.b + self.b * doc_len / self.avg_doc_len)
             body_score += idf * numerator / denominator
 
-        # Title BM25 (boosted)
         title_tf = Counter(doc.title_tokens)
         title_score = 0.0
         for term in query_tokens:
             tf = title_tf.get(term, 0)
             if tf == 0:
                 continue
-            title_score += self.idf(term) * tf  # Simplified for titles
+            title_score += self.idf(term) * tf
 
-        # Tag exact match bonus
         tag_score = sum(self.tag_boost for qt in query_tokens if qt in doc.tags)
-
         return body_score + self.title_boost * title_score + tag_score
 
     def search(self, query: str, limit: int = 10) -> list[tuple[Document, float]]:
-        """Search the index and return ranked results."""
         query_tokens = tokenize(query)
         if not query_tokens:
             return []
-
-        scored = []
-        for doc in self.documents:
-            score = self.score_document(doc, query_tokens)
-            if score > 0:
-                scored.append((doc, score))
-
+        scored = [(doc, self.score_document(doc, query_tokens))
+                  for doc in self.documents]
+        scored = [(doc, s) for doc, s in scored if s > 0]
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[:limit]
+
+
+# --- Semantic Index (ChromaDB) ---
+
+class SemanticIndex:
+    """ChromaDB-backed semantic search with persistent storage."""
+
+    def __init__(self, persist_dir: Optional[Path] = None):
+        self._client = None
+        self._collection = None
+        self._persist_dir = persist_dir
+
+    def _ensure_client(self):
+        if self._client is not None:
+            return
+        try:
+            import chromadb
+            if self._persist_dir:
+                self._persist_dir.mkdir(parents=True, exist_ok=True)
+                self._client = chromadb.PersistentClient(
+                    path=str(self._persist_dir)
+                )
+            else:
+                self._client = chromadb.Client()
+            self._collection = self._client.get_or_create_collection(
+                name="recall_memory",
+                metadata={"hnsw:space": "cosine"},
+            )
+        except ImportError:
+            return  # ChromaDB not available, graceful degradation
+
+    def is_available(self) -> bool:
+        self._ensure_client()
+        return self._client is not None
+
+    def index(self, documents: list[Document]):
+        """Add/update documents in the semantic index."""
+        if not self.is_available():
+            return
+
+        ids = []
+        texts = []
+        metadatas = []
+
+        for doc in documents:
+            doc_id = hashlib.md5(doc.path.encode()).hexdigest()
+            content_hash = doc.content_hash()
+
+            # Check if document already indexed with same content
+            try:
+                existing = self._collection.get(ids=[doc_id], include=["metadatas"])
+                if (existing["metadatas"] and
+                        existing["metadatas"][0].get("content_hash") == content_hash):
+                    continue  # Already up to date
+            except Exception:
+                pass
+
+            ids.append(doc_id)
+            texts.append(doc.search_text())
+            metadatas.append({
+                "path": doc.path,
+                "title": doc.title,
+                "content_hash": content_hash,
+                "tags": ",".join(doc.tags) if doc.tags else "",
+                "type": doc.meta.get("type", ""),
+            })
+
+        if ids:
+            self._collection.upsert(ids=ids, documents=texts, metadatas=metadatas)
+
+    def search(self, query: str, limit: int = 10) -> list[tuple[str, float]]:
+        """Search and return (path, distance) tuples."""
+        if not self.is_available():
+            return []
+
+        results = self._collection.query(
+            query_texts=[query],
+            n_results=min(limit, self._collection.count() or 1),
+            include=["metadatas", "distances"],
+        )
+
+        pairs = []
+        if results["metadatas"] and results["distances"]:
+            for meta, dist in zip(results["metadatas"][0], results["distances"][0]):
+                pairs.append((meta["path"], dist))
+        return pairs
+
+
+# --- Reciprocal Rank Fusion ---
+
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[tuple[str, float]]],
+    k: int = 60,
+) -> list[tuple[str, float]]:
+    """Combine multiple ranked lists using RRF.
+
+    Each input is a list of (path, score) tuples, already sorted best-first.
+    Returns merged list of (path, rrf_score) sorted by fused score.
+    """
+    scores: dict[str, float] = {}
+    for ranked in ranked_lists:
+        for rank, (path, _) in enumerate(ranked):
+            scores[path] = scores.get(path, 0.0) + 1.0 / (k + rank + 1)
+    result = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return result
 
 
 # --- File Discovery ---
@@ -214,7 +313,6 @@ def find_markdown_files(directory: Path) -> list[Path]:
     """Recursively find all .md files, excluding hidden dirs and archive/."""
     files = []
     for root, dirs, filenames in os.walk(directory):
-        # Skip hidden directories and archive
         dirs[:] = [d for d in dirs if not d.startswith(".") and d != "archive"]
         for fname in filenames:
             if fname.endswith(".md"):
@@ -222,10 +320,61 @@ def find_markdown_files(directory: Path) -> list[Path]:
     return sorted(files)
 
 
+# --- Search Orchestrator ---
+
+def hybrid_search(
+    documents: list[Document],
+    query: str,
+    limit: int = 10,
+    mode: str = "hybrid",
+    persist_dir: Optional[Path] = None,
+) -> list[tuple[Document, float]]:
+    """Run hybrid BM25 + semantic search with RRF fusion."""
+    doc_by_path = {d.path: d for d in documents}
+
+    # BM25
+    bm25_results = []
+    if mode in ("bm25", "hybrid"):
+        bm25 = BM25Index()
+        bm25.build(documents)
+        bm25_results = [(doc.path, score) for doc, score in bm25.search(query, limit * 2)]
+
+    # Semantic
+    semantic_results = []
+    if mode in ("semantic", "hybrid"):
+        sem = SemanticIndex(persist_dir=persist_dir)
+        if sem.is_available():
+            sem.index(documents)
+            raw = sem.search(query, limit * 2)
+            # Convert distances to scores (lower distance = better, invert for ranking)
+            # ChromaDB cosine distance: 0 = identical, 2 = opposite
+            semantic_results = [(path, 2.0 - dist) for path, dist in raw]
+        elif mode == "semantic":
+            print("Warning: ChromaDB not available, falling back to BM25", file=sys.stderr)
+            bm25 = BM25Index()
+            bm25.build(documents)
+            bm25_results = [(doc.path, score) for doc, score in bm25.search(query, limit * 2)]
+
+    # Fuse
+    if mode == "hybrid" and bm25_results and semantic_results:
+        fused = reciprocal_rank_fusion([bm25_results, semantic_results])
+    elif bm25_results:
+        fused = bm25_results
+    elif semantic_results:
+        fused = semantic_results
+    else:
+        return []
+
+    results = []
+    for path, score in fused[:limit]:
+        if path in doc_by_path:
+            results.append((doc_by_path[path], score))
+    return results
+
+
 # --- CLI ---
 
 def cmd_search(args):
-    """Search markdown files."""
     directory = Path(args.directory)
     if not directory.is_dir():
         print(f"Error: {directory} is not a directory", file=sys.stderr)
@@ -236,43 +385,50 @@ def cmd_search(args):
         print("No markdown files found.", file=sys.stderr)
         sys.exit(1)
 
-    documents = []
-    for f in files:
-        doc = load_document(f)
-        if doc:
-            documents.append(doc)
+    documents = [load_document(f) for f in files]
+    documents = [d for d in documents if d]
 
-    index = BM25Index()
-    index.build(documents)
-
+    persist_dir = directory / ".recall_index"
     query = " ".join(args.query)
-    results = index.search(query, limit=args.limit)
+    results = hybrid_search(documents, query, args.limit, args.mode, persist_dir)
 
     if not results:
         print("No results found.")
+        return
+
+    if args.format == "json":
+        output = []
+        for doc, score in results:
+            output.append({
+                "path": os.path.relpath(doc.path, directory),
+                "title": doc.title,
+                "score": round(score, 4),
+                "tags": doc.tags,
+                "type": doc.meta.get("type", ""),
+                "snippet": doc.body[:300].replace("\n", " ").strip(),
+            })
+        print(json.dumps(output, indent=2))
         return
 
     for i, (doc, score) in enumerate(results, 1):
         rel_path = os.path.relpath(doc.path, directory)
         if args.verbose:
             print(f"\n{'─' * 60}")
-            print(f"  [{i}] {doc.title}  (score: {score:.3f})")
+            print(f"  [{i}] {doc.title}  (score: {score:.4f})")
             print(f"      {rel_path}")
             if doc.tags:
                 print(f"      tags: {', '.join(doc.tags)}")
             if doc.meta.get("type"):
                 print(f"      type: {doc.meta['type']}")
-            # Show snippet
             snippet = doc.body[:200].replace("\n", " ").strip()
             if len(doc.body) > 200:
                 snippet += "..."
             print(f"      {snippet}")
         else:
-            print(f"  {score:6.3f}  {rel_path}  —  {doc.title}")
+            print(f"  {score:.4f}  {rel_path}  —  {doc.title}")
 
 
 def cmd_stats(args):
-    """Show index statistics."""
     directory = Path(args.directory)
     files = find_markdown_files(directory)
     documents = [load_document(f) for f in files]
@@ -289,42 +445,52 @@ def cmd_stats(args):
     print(f"Directory: {directory}")
     print(f"Documents: {len(documents)}")
     print(f"Total tokens: {total_tokens}")
-    print(f"Avg tokens/doc: {total_tokens / len(documents):.0f}" if documents else "")
+    if documents:
+        print(f"Avg tokens/doc: {total_tokens / len(documents):.0f}")
     if types:
         print(f"Types: {dict(types)}")
     if all_tags:
         print(f"Tags: {', '.join(sorted(all_tags))}")
 
+    # Check semantic index
+    sem = SemanticIndex(persist_dir=directory / ".recall_index")
+    if sem.is_available():
+        sem._ensure_client()
+        count = sem._collection.count() if sem._collection else 0
+        print(f"Semantic index: {count} embeddings")
+    else:
+        print("Semantic index: unavailable (chromadb not installed)")
+
 
 def main():
     parser = argparse.ArgumentParser(
         prog="recall",
-        description="Search markdown memory files using BM25 ranking.",
+        description="Hybrid search over markdown files (BM25 + semantic embeddings).",
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # Search (default)
     search_parser = subparsers.add_parser("search", help="Search files")
     search_parser.add_argument("query", nargs="+", help="Search query")
     search_parser.add_argument("--dir", "-d", dest="directory", default=".", help="Directory to search")
     search_parser.add_argument("--limit", "-n", type=int, default=10, help="Max results")
     search_parser.add_argument("--verbose", "-v", action="store_true", help="Show details")
+    search_parser.add_argument("--format", "-f", choices=["text", "json"], default="text", help="Output format")
+    search_parser.add_argument("--mode", "-m", choices=["bm25", "semantic", "hybrid"], default="hybrid", help="Search mode")
 
-    # Stats
     stats_parser = subparsers.add_parser("stats", help="Show index stats")
     stats_parser.add_argument("--dir", "-d", dest="directory", default=".", help="Directory")
 
     args = parser.parse_args()
 
-    # Default to search if no subcommand but args look like a query
     if args.command is None:
         if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-            # Treat bare args as search query
             args.command = "search"
             args.query = sys.argv[1:]
             args.directory = "."
             args.limit = 10
             args.verbose = False
+            args.format = "text"
+            args.mode = "hybrid"
         else:
             parser.print_help()
             sys.exit(1)
