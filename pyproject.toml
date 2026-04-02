@@ -5,12 +5,30 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "recall-search"
 version = "0.3.0"
-description = "Hybrid search over markdown files"
+description = "Hybrid search over markdown files — BM25F keywords + semantic embeddings with convex combination fusion"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = []
+keywords = ["search", "bm25", "hybrid-search", "semantic-search", "markdown", "knowledge-base"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Text Processing :: Indexing",
+]
+
+[project.urls]
+Homepage = "https://github.com/tavian-dev/recall"
+Repository = "https://github.com/tavian-dev/recall"
+Issues = "https://github.com/tavian-dev/recall/issues"
 
 [project.optional-dependencies]
 semantic = ["chromadb>=1.0"]
+mcp = ["fastmcp>=2.0"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
