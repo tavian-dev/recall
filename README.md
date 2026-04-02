@@ -47,7 +47,7 @@ python recall.py stats --dir ./notes
 
 ## How it works
 
-1. **BM25** — standard TF-IDF keyword search with title boosting (3x) and tag matching (+2.0). Good for exact term matches.
+1. **BM25F** — multi-field BM25 that properly handles title + body scoring. Normalizes term frequency per field, combines with configurable weights, then applies saturation once (avoiding the double-counting problem of naive per-field BM25). Tag exact matching adds a bonus.
 2. **Semantic** — ChromaDB with built-in sentence-transformer embeddings. Understands that "login failures" relates to "authentication errors." Persistent index (`.recall_index/`) avoids re-embedding unchanged files.
 3. **Reciprocal Rank Fusion** — combines both ranked lists into a single result set. Documents strong in both methods rank highest.
 
