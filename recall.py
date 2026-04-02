@@ -18,6 +18,7 @@ import os
 import re
 import sys
 from collections import Counter
+from datetime import datetime
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -522,6 +523,46 @@ def cmd_stats(args):
         print("Semantic index: unavailable (chromadb not installed)")
 
 
+def cmd_add(args):
+    """Add a new memory entry as a markdown file."""
+    directory = Path(args.directory)
+    directory.mkdir(parents=True, exist_ok=True)
+
+    # Generate title from content if not provided
+    title = args.title or args.content[:60].strip().rstrip(".")
+    # Generate filename from title
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50]
+    today = datetime.now().strftime("%Y-%m-%d")
+    filepath = directory / f"{slug}.md"
+
+    # Handle filename collisions
+    counter = 1
+    while filepath.exists():
+        filepath = directory / f"{slug}-{counter}.md"
+        counter += 1
+
+    tags_str = ""
+    if args.tags:
+        tags_list = [t.strip() for t in args.tags.split(",")]
+        tags_str = f"tags: [{', '.join(tags_list)}]\n"
+
+    content = f"""---
+type: {args.entry_type}
+title: "{title}"
+confidence: {args.confidence}
+last_updated: {today}
+source: {args.source}
+{tags_str}---
+
+{args.content}
+"""
+
+    filepath.write_text(content)
+    print(f"Added: {filepath}")
+    print(f"  title: {title}")
+    print(f"  type: {args.entry_type}, confidence: {args.confidence}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="recall",
@@ -542,6 +583,15 @@ def main():
 
     stats_parser = subparsers.add_parser("stats", help="Show index stats")
     stats_parser.add_argument("--dir", "-d", dest="directory", default=".", help="Directory")
+
+    add_parser = subparsers.add_parser("add", help="Add a new memory entry")
+    add_parser.add_argument("content", help="The content to remember")
+    add_parser.add_argument("--dir", "-d", dest="directory", default=".", help="Directory to save to")
+    add_parser.add_argument("--title", "-t", help="Entry title (auto-generated from content if omitted)")
+    add_parser.add_argument("--type", dest="entry_type", default="fact", help="Entry type (fact, decision, observation, procedure)")
+    add_parser.add_argument("--confidence", "-c", type=float, default=0.7, help="Confidence level 0.0-1.0")
+    add_parser.add_argument("--tags", help="Comma-separated tags")
+    add_parser.add_argument("--source", "-s", default="observation", help="Source (observation, operator, inference, session)")
 
     args = parser.parse_args()
 
@@ -565,6 +615,8 @@ def main():
         cmd_search(args)
     elif args.command == "stats":
         cmd_stats(args)
+    elif args.command == "add":
+        cmd_add(args)
 
 
 if __name__ == "__main__":
