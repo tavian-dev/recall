@@ -141,14 +141,24 @@ def load_document(filepath: Path) -> Optional[Document]:
 
 @dataclass
 class BM25Index:
-    """BM25 index over a collection of documents."""
+    """BM25F index over a collection of documents.
+
+    Uses BM25F (multi-field BM25) which properly handles multiple fields
+    by normalizing TF per field, combining, then applying saturation once.
+    This avoids double-counting saturation that naive per-field scoring causes.
+    Reference: softwaredoug.com/blog/2025/09/18/bm25f-from-scratch
+    """
     documents: list[Document] = field(default_factory=list)
-    avg_doc_len: float = 0.0
+    avg_body_len: float = 0.0
+    avg_title_len: float = 0.0
     doc_count: int = 0
+    # Per-field document frequency (max across fields for unified IDF)
     df: dict[str, int] = field(default_factory=dict)
     k1: float = 1.2
-    b: float = 0.75
-    title_boost: float = 3.0
+    b_body: float = 0.75     # Length normalization for body
+    b_title: float = 0.3     # Less normalization for titles (they're short)
+    w_title: float = 3.0     # Title field weight
+    w_body: float = 1.0      # Body field weight
     tag_boost: float = 2.0
 
     def build(self, documents: list[Document]):
@@ -156,42 +166,69 @@ class BM25Index:
         self.doc_count = len(documents)
         if self.doc_count == 0:
             return
-        total_tokens = sum(d.token_count() for d in documents)
-        self.avg_doc_len = total_tokens / self.doc_count if self.doc_count else 1
 
-        self.df = Counter()
+        total_body = sum(d.token_count() for d in documents)
+        total_title = sum(len(d.title_tokens) for d in documents)
+        self.avg_body_len = total_body / self.doc_count if self.doc_count else 1
+        self.avg_title_len = total_title / self.doc_count if self.doc_count else 1
+
+        # Unified DF: max(df_body, df_title) per term
+        df_body: dict[str, int] = Counter()
+        df_title: dict[str, int] = Counter()
         for doc in documents:
-            unique_terms = set(doc.tokens) | set(doc.title_tokens)
-            for term in unique_terms:
-                self.df[term] += 1
+            for term in set(doc.tokens):
+                df_body[term] += 1
+            for term in set(doc.title_tokens):
+                df_title[term] += 1
+
+        all_terms = set(df_body.keys()) | set(df_title.keys())
+        self.df = {term: max(df_body.get(term, 0), df_title.get(term, 0))
+                   for term in all_terms}
 
     def idf(self, term: str) -> float:
+        """Unified IDF using max DF across fields."""
         n = self.df.get(term, 0)
         return math.log((self.doc_count - n + 0.5) / (n + 0.5) + 1)
 
+    def _length_normalized_tf(self, tf: int, field_len: int,
+                               avg_field_len: float, b: float) -> float:
+        """Normalize term frequency by field length."""
+        if field_len == 0:
+            return 0.0
+        return tf / (1 - b + b * field_len / avg_field_len)
+
     def score_document(self, doc: Document, query_tokens: list[str]) -> float:
         body_tf = Counter(doc.tokens)
-        doc_len = doc.token_count()
-        body_score = 0.0
-        for term in query_tokens:
-            tf = body_tf.get(term, 0)
-            if tf == 0:
-                continue
-            idf = self.idf(term)
-            numerator = tf * (self.k1 + 1)
-            denominator = tf + self.k1 * (1 - self.b + self.b * doc_len / self.avg_doc_len)
-            body_score += idf * numerator / denominator
-
         title_tf = Counter(doc.title_tokens)
-        title_score = 0.0
-        for term in query_tokens:
-            tf = title_tf.get(term, 0)
-            if tf == 0:
-                continue
-            title_score += self.idf(term) * tf
+        body_len = doc.token_count()
+        title_len = len(doc.title_tokens)
 
-        tag_score = sum(self.tag_boost for qt in query_tokens if qt in doc.tags)
-        return body_score + self.title_boost * title_score + tag_score
+        score = 0.0
+        for term in query_tokens:
+            # Step 1: Length-normalize TF per field
+            norm_body = self._length_normalized_tf(
+                body_tf.get(term, 0), body_len, self.avg_body_len, self.b_body
+            )
+            norm_title = self._length_normalized_tf(
+                title_tf.get(term, 0), title_len, self.avg_title_len, self.b_title
+            )
+
+            # Step 2: Weighted combination of normalized TFs
+            combined_tf = self.w_body * norm_body + self.w_title * norm_title
+
+            if combined_tf == 0:
+                continue
+
+            # Step 3: Apply saturation ONCE to the combined TF
+            saturated = combined_tf / (combined_tf + self.k1)
+
+            # Step 4: Multiply by unified IDF
+            score += self.idf(term) * saturated * (self.k1 + 1)
+
+        # Tag exact match bonus (separate from BM25F)
+        score += sum(self.tag_boost for qt in query_tokens if qt in doc.tags)
+
+        return score
 
     def search(self, query: str, limit: int = 10) -> list[tuple[Document, float]]:
         query_tokens = tokenize(query)
