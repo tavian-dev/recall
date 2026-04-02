@@ -1,0 +1,10 @@
+LICENSE
+README.md
+pyproject.toml
+recall.py
+recall_search.egg-info/PKG-INFO
+recall_search.egg-info/SOURCES.txt
+recall_search.egg-info/dependency_links.txt
+recall_search.egg-info/entry_points.txt
+recall_search.egg-info/requires.txt
+recall_search.egg-info/top_level.txt

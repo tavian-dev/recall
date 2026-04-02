@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recall-search"
+version = "0.3.0"
+description = "Hybrid search over markdown files"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+semantic = ["chromadb>=1.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+recall = "recall:main"
+
+[tool.setuptools]
+py-modules = ["recall"]
